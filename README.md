@@ -10,6 +10,8 @@
 * https://docs.kernel.org/admin-guide/mm/zswap.html#zswap
 * https://www.youtube.com/watch?v=0bnWQF7WQP0
 * https://lpc.events/event/11/contributions/896/attachments/793/1493/slides-r2.pdf
+* https://docs.kernel.org/admin-guide/cgroup-v2.html
+* https://biriukov.dev/docs/page-cache/4-page-cache-eviction-and-page-reclaim/
 
 *Обычное описание swap'a выглядит следующим образом:*
 
