@@ -3,21 +3,29 @@
 Источники:
 
 * https://chrisdown.name/2018/01/02/in-defence-of-swap.html
-* https://man7.org/linux/man-pages/man5/proc_meminfo.5.html
 * https://unix.stackexchange.com/questions/677006/what-is-anon-pages-in-memory
+* https://www.kernel.org/doc/gorman/html/understand/understand013.html
 * https://www.kernel.org/doc/gorman/html/understand/understand014.html
 * https://habr.com/ru/companies/selectel/articles/303190/
 * https://docs.kernel.org/admin-guide/mm/zswap.html#zswap
-* https://www.youtube.com/watch?v=0bnWQF7WQP0
+* https://www.youtube.com/watch?v=mbqnjUR3LwY
+* https://www.youtube.com/watch?v=7aONIVSXiJ8
+* https://www.youtube.com/watch?v=tpRlczF0pqw
 * https://lpc.events/event/11/contributions/896/attachments/793/1493/slides-r2.pdf
 * https://docs.kernel.org/admin-guide/cgroup-v2.html
 * https://biriukov.dev/docs/page-cache/4-page-cache-eviction-and-page-reclaim/
 
 *Обычное описание swap'a выглядит следующим образом:*
 
->**Swap** is essentially emergency memory; a space set aside for times when your system temporarily needs more physical memory than you have available in RAM. It's considered "bad" in the sense that it's slow and inefficient, and if your system constantly needs to use **swap** then it obviously doesn't have enough memory. […] If you have enough RAM to handle all of your needs, and don't expect to ever max it out, then you should be perfectly safe running without a **swap** space.
-
 > По сути, **swap** — это аварийная память; пространство, отведенное на случай, если вашей системе временно потребуется больше физической памяти, чем имеется в оперативной памяти. Это считается «плохим» в том смысле, что это медленно и неэффективно, и если вашей системе постоянно приходится использовать **swap**, то ей явно не хватает памяти. […] Если у вас достаточно оперативной памяти для удовлетворения всех ваших потребностей, и вы не ожидаете, что она когда-либо будет исчерпана, то вы можете абсолютно спокойно отказаться от использования **swap**
+
+или
+
+>Многие знают о существовании swap (файл подкачки), который начинает использоваться, когда оперативной памяти начинает не хватать. Я, как и многие, стараюсь избавляться от такой штуки, потому как swap использует для хранения данных наши ssd/hdd, что в свою очередь имеет минусы:
+> * медленная скорость записи/чтения
+> * убивает ресурс диска
+>
+>Но если выключить swap, то мы рискуем повиснуть в тот момент, когда физическая память закончится, ведь магическим образом она ниоткуда не появится
 
 Это не так. **Точнее, не совсем так?**. Но, для начала, требуется рассказать немного про память в Linux.
 
@@ -317,3 +325,6 @@ struct swap_list_t {
 * zram
 * memory pressure и config_psi
 * попытаться в low-level детали
+
+
+![Simple route of eviction](./pics/simple_route_of_eviction.png)
