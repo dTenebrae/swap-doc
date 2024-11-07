@@ -14,6 +14,11 @@
 * https://lpc.events/event/11/contributions/896/attachments/793/1493/slides-r2.pdf
 * https://docs.kernel.org/admin-guide/cgroup-v2.html
 * https://biriukov.dev/docs/page-cache/4-page-cache-eviction-and-page-reclaim/
+* https://manybutfinite.com/post/anatomy-of-a-program-in-memory/
+* https://habr.com/ru/companies/smart_soft/articles/185226/
+* https://habr.com/ru/companies/smart_soft/articles/226315/
+* https://habr.com/ru/companies/smart_soft/articles/228937/
+
 
 *Обычное описание swap'a выглядит следующим образом:*
 
@@ -327,4 +332,7 @@ struct swap_list_t {
 * попытаться в low-level детали
 
 
-![Simple route of eviction](./pics/simple_route_of_eviction.png)
+#### Что такое страничный кэш (Page Cache)
+
+
+![Page cache](./pics/page-cache.png)
