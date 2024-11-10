@@ -21,6 +21,7 @@
 * https://blogs.oracle.com/linux/post/understanding-linux-kernel-memory-statistics
 * https://wiki.archlinux.org/title/Zswap
 * https://wiki.archlinux.org/title/Zram
+* https://www.freedesktop.org/wiki/Software/systemd/ControlGroupInterface/
 
 
 *Обычное описание swap'a выглядит следующим образом:*
@@ -469,13 +470,30 @@ Cgroups v1 имели собственную настройку swappiness. В c
 Например, если мы с помощью `dd` загрузим половину файла в страничный кэш, то при попытке обратиться к этой половине из программы с помощью `mmap()` мы получим **minor page fault**. Ядру не нужно инициировать дисковые операции для получения данных, все уже находится в кэше. Но при попытке обратиться ко второй части файла, мы ожидаемо получим **major page fault**.
 
 
-#### Cgroup (control groups)
+#### Cgroup
 
-Краткое описание. Упомянуть про systemd
+**cgroup** (control group) - механизм для иерархической организации процессов, а также контролируемого и настраиваемого распределения ресурсов среди них.
 
-#### Как работает swap
+**cgroup** состоит из двух основных компонентов - ядро (core) и 
+контроллеры. Ядро, главным образом, ответственно за иерархическую организацию процессов. Контроллеры же, обычно, за распределение определенного типа системных ресурсов.
 
-`get_scan_count()`
+**cgroup**'ы формируют древовидную структуру и каждый процесс в система принадлежит только одной cgroup'е. Все потоки процесса принадлежат той же cgroup'е, что и сам процесс. При создании, все процессы помещаются в ту же cgroup'у что и родительский процесс. Процесс может быть перенесен в другую cgroup'у, это не изменит принадлежность дочерних процессов к текущей cgroup'е.
+
+Типы контроллеров:
+* CPU
+* IO
+* memory
+* pids
+* rdma
+* eBPF
+
+При этом контроллеры rdma и eBPF не могут быть настроены пользователем.
+
+Начиная с версии 205, срезы(slices) и сервисы systemd - абстракция над cgroup'ами.
+
+#### Кого вытесняем
+
+Давайте разберем функцию `get_scan_count()` из `mm/vmscan.c`
 
 ```c
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
@@ -487,13 +505,19 @@ Cgroups v1 имели собственную настройку swappiness. В c
 	enum scan_balance scan_balance;
 	unsigned long ap, fp;
 	enum lru_list lru;
+```
 
+Если нет swap'a, то сканировать анонимные страницы не имеет смысла, можно вытеснять только файловые.
+```c
 	/* If we have no swap space, do not bother scanning anon pages. */
 	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
+```
 
+Так как глобальное вытеснение будет пытаться освободить анонимные страницы, даже если выключен параметр swappiness, пользователи cgroup должны иметь параметр для отключения swap'а внутри cgroup'ы.
+```c
 	/*
 	 * Global reclaim will swap to prevent OOM even with no
 	 * swappiness, but memcg users want to use this knob to
@@ -505,7 +529,10 @@ Cgroups v1 имели собственную настройку swappiness. В c
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
+```
 
+Когда мы на грани OOM - сканируем анонимные и файловые страницы в равной степени
+```c
 	/*
 	 * Do not apply any pressure balancing cleverness when the
 	 * system is close to OOM, scan both anon and file equally
@@ -515,7 +542,10 @@ Cgroups v1 имели собственную настройку swappiness. В c
 		scan_balance = SCAN_EQUAL;
 		goto out;
 	}
+```
 
+Когда практически не осталось файловых страниц - начинаем сканировать анонимные. Даже если параметр swappiness говорит об обратном.
+```c
 	/*
 	 * If the system is almost out of file pages, force-scan anon.
 	 */
@@ -523,7 +553,10 @@ Cgroups v1 имели собственную настройку swappiness. В c
 		scan_balance = SCAN_ANON;
 		goto out;
 	}
+```
 
+Если в invactive списке еще достаточно файловых страниц - не пытаемся вытеснять анонимные.
+```c
 	/*
 	 * If there is enough inactive page cache, we do not reclaim
 	 * anything from the anonymous working right now.
@@ -532,7 +565,10 @@ Cgroups v1 имели собственную настройку swappiness. В c
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
+```
 
+Если не сработало ни одно условие выше - начинаем считать веса, от которых будет зависеть, что будем вытеснять
+```c
 	scan_balance = SCAN_FRACT;
 	/*
 	 * Calculate the pressure balance between anon and file pages.
@@ -565,6 +601,132 @@ Cgroups v1 имели собственную настройку swappiness. В c
 	denominator = ap + fp;
 ```
 
+Далее пробегаемся по всем спискам и определяем, кого будем вытеснять.
+Записываем полученные значения в `nr`
+* `nr[0]` - inactive-список анонимных страниц
+* `nr[1]` - active-список анонимных страниц
+* `nr[2]` - inactive-список файловых страниц
+* `nr[3]` - active-список файловых страниц
+
+
+А номер (0, 1, 2, 3) определяется в следующем энумераторе
+```c
+enum lru_list {
+	LRU_INACTIVE_ANON = LRU_BASE,
+	LRU_ACTIVE_ANON = LRU_BASE + LRU_ACTIVE,
+	LRU_INACTIVE_FILE = LRU_BASE + LRU_FILE,
+	LRU_ACTIVE_FILE = LRU_BASE + LRU_FILE + LRU_ACTIVE,
+	LRU_UNEVICTABLE,
+	NR_LRU_LISTS
+};
+```
+
+Вычисляем значение `scan`, которое и определяет в каком объеме мы вытесняем.
+
+```c
+out:
+	for_each_evictable_lru(lru) {
+		int file = is_file_lru(lru);
+		unsigned long lruvec_size;
+		unsigned long low, min;
+		unsigned long scan;
+
+		lruvec_size = lruvec_lru_size(lruvec, lru, sc->reclaim_idx);
+		mem_cgroup_protection(sc->target_mem_cgroup, memcg,
+				      &min, &low);
+
+		if (min || low) {
+			unsigned long cgroup_size = mem_cgroup_size(memcg);
+			unsigned long protection;
+
+			/* memory.low scaling, make sure we retry before OOM */
+			if (!sc->memcg_low_reclaim && low > min) {
+				protection = low;
+				sc->memcg_low_skipped = 1;
+			} else {
+				protection = min;
+			}
+
+			/* Avoid TOCTOU with earlier protection check */
+			cgroup_size = max(cgroup_size, protection);
+
+			scan = lruvec_size - lruvec_size * protection /
+				(cgroup_size + 1);
+
+			/*
+			 * Minimally target SWAP_CLUSTER_MAX pages to keep
+			 * reclaim moving forwards, avoiding decrementing
+			 * sc->priority further than desirable.
+			 */
+			scan = max(scan, SWAP_CLUSTER_MAX);
+		} else {
+			scan = lruvec_size;
+		}
+
+		scan >>= sc->priority;
+
+		/*
+		 * If the cgroup's already been deleted, make sure to
+		 * scrape out the remaining cache.
+		 */
+		if (!scan && !mem_cgroup_online(memcg))
+			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
+```
+
+Тут проверяем, а в каком режиме мы находимся
+```c
+
+		switch (scan_balance) {
+```
+
+Если в режиме равного сканирования - то записываем вычисленный scan для всех списков.
+```c
+		case SCAN_EQUAL:
+			/* Scan lists relative to size */
+			break;
+```
+
+Если мы в ситуации, когда используется swappiness (например, уже осталось не так много файловых страниц, но до полного исчерпания еще далеко) - применяем вычисленные ранее веса, для того чтобы распределить вытеснение анонимных и файловых страниц соответственно этой переменной.
+```c
+		case SCAN_FRACT:
+			/*
+			 * Scan types proportional to swappiness and
+			 * their relative recent reclaim efficiency.
+			 * Make sure we don't miss the last page on
+			 * the offlined memory cgroups because of a
+			 * round-off error.
+			 */
+			scan = mem_cgroup_online(memcg) ?
+			       div64_u64(scan * fraction[file], denominator) :
+			       DIV64_U64_ROUND_UP(scan * fraction[file],
+						  denominator);
+			break;
+```
+
+Если режим файловый - то значение scan пишем в соответствующий `nr`, а в анонимный - 0. И наоборот
+```c
+		case SCAN_FILE:
+		case SCAN_ANON:
+			/* Scan one type exclusively */
+			if ((scan_balance == SCAN_FILE) != file)
+				scan = 0;
+			break;
+		default:
+			/* Look ma, no brain */
+			BUG();
+		}
+
+		nr[lru] = scan;
+	}
+}
+```
+
+Какие выводы можно из этого сделать:
+
+* swappiness играет роль далеко не всегда.
+* Если swap'a нет - то будут сбрасываться на диск только файловые страницы
+* В случае с приближением OOM в равной степени начинают сканироваться все списки
+* если файловых страниц достаточно - вытесняться будут только они, вне зависимости от настроек
 
 #### ZRAM и ZSWAP
 
@@ -585,9 +747,6 @@ Cgroups v1 имели собственную настройку swappiness. В c
 
 Требуется написать про: 
 
-* сделать описание всех syscall'ов, которые упоминаются в тексте. mlock, mlockall итп
-* cgroups
 * memory pressure и config_psi
 * попытаться в low-level детали
-* про виртуальную память
 
