@@ -19,6 +19,8 @@
 * https://habr.com/ru/companies/smart_soft/articles/226315/
 * https://habr.com/ru/companies/smart_soft/articles/228937/
 * https://blogs.oracle.com/linux/post/understanding-linux-kernel-memory-statistics
+* https://wiki.archlinux.org/title/Zswap
+* https://wiki.archlinux.org/title/Zram
 
 
 *Обычное описание swap'a выглядит следующим образом:*
@@ -322,18 +324,6 @@ struct swap_list_t {
 };
 ```
 
-Требуется написать про: 
-
-* сделать описание всех syscall'ов, которые упоминаются в тексте. mlock, mlockall итп
-* механизм reclaim'a (lru_gen и компания)
-* cgroups
-* zswap
-* zram
-* memory pressure и config_psi
-* попытаться в low-level детали
-* про виртуальную память
-
-
 #### Что такое страничный кэш (Page Cache)
 
 Страничный кэш - это часть виртуальной файловой системы, основной задачей которой является уменьшение задержки ввода-вывода при операциях чтения/записи
@@ -477,3 +467,127 @@ Cgroups v1 имели собственную настройку swappiness. В c
 Существует 2 вида page fault - **minor** и **major**. **Minor** говорит о том, что дисковых операций производиться не будет, **major** - что будет.
 
 Например, если мы с помощью `dd` загрузим половину файла в страничный кэш, то при попытке обратиться к этой половине из программы с помощью `mmap()` мы получим **minor page fault**. Ядру не нужно инициировать дисковые операции для получения данных, все уже находится в кэше. Но при попытке обратиться ко второй части файла, мы ожидаемо получим **major page fault**.
+
+
+#### Cgroup (control groups)
+
+Краткое описание. Упомянуть про systemd
+
+#### Как работает swap
+
+`get_scan_count()`
+
+```c
+	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+	unsigned long anon_cost, file_cost, total_cost;
+	int swappiness = mem_cgroup_swappiness(memcg);
+	u64 fraction[ANON_AND_FILE];
+	u64 denominator = 0;	/* gcc */
+	enum scan_balance scan_balance;
+	unsigned long ap, fp;
+	enum lru_list lru;
+
+	/* If we have no swap space, do not bother scanning anon pages. */
+	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
+		scan_balance = SCAN_FILE;
+		goto out;
+	}
+
+	/*
+	 * Global reclaim will swap to prevent OOM even with no
+	 * swappiness, but memcg users want to use this knob to
+	 * disable swapping for individual groups completely when
+	 * using the memory controller's swap limit feature would be
+	 * too expensive.
+	 */
+	if (cgroup_reclaim(sc) && !swappiness) {
+		scan_balance = SCAN_FILE;
+		goto out;
+	}
+
+	/*
+	 * Do not apply any pressure balancing cleverness when the
+	 * system is close to OOM, scan both anon and file equally
+	 * (unless the swappiness setting disagrees with swapping).
+	 */
+	if (!sc->priority && swappiness) {
+		scan_balance = SCAN_EQUAL;
+		goto out;
+	}
+
+	/*
+	 * If the system is almost out of file pages, force-scan anon.
+	 */
+	if (sc->file_is_tiny) {
+		scan_balance = SCAN_ANON;
+		goto out;
+	}
+
+	/*
+	 * If there is enough inactive page cache, we do not reclaim
+	 * anything from the anonymous working right now.
+	 */
+	if (sc->cache_trim_mode) {
+		scan_balance = SCAN_FILE;
+		goto out;
+	}
+
+	scan_balance = SCAN_FRACT;
+	/*
+	 * Calculate the pressure balance between anon and file pages.
+	 *
+	 * The amount of pressure we put on each LRU is inversely
+	 * proportional to the cost of reclaiming each list, as
+	 * determined by the share of pages that are refaulting, times
+	 * the relative IO cost of bringing back a swapped out
+	 * anonymous page vs reloading a filesystem page (swappiness).
+	 *
+	 * Although we limit that influence to ensure no list gets
+	 * left behind completely: at least a third of the pressure is
+	 * applied, before swappiness.
+	 *
+	 * With swappiness at 100, anon and file have equal IO cost.
+	 */
+	total_cost = sc->anon_cost + sc->file_cost;
+	anon_cost = total_cost + sc->anon_cost;
+	file_cost = total_cost + sc->file_cost;
+	total_cost = anon_cost + file_cost;
+
+	ap = swappiness * (total_cost + 1);
+	ap /= anon_cost + 1;
+
+	fp = (200 - swappiness) * (total_cost + 1);
+	fp /= file_cost + 1;
+
+	fraction[0] = ap;
+	fraction[1] = fp;
+	denominator = ap + fp;
+```
+
+
+#### ZRAM и ZSWAP
+
+**zram** (раньше назывался compcache, compressed cache) - модуль ядра Linux, используемый для создания блокового устройства в оперативной памяти, RAM-диск с комрессией на лету. Обычно используется для подкачки (swap) или как RAM-диск общего назначения, обычно используемый для хранения временных файлов.
+
+Первоначально созданное блоковое устройство не резервирует память. Только когда требуется выгрузить страница в swap, она сжимается и помещается в zram. Данное блоковое устройство динамически изменяет размер выделенной памяти по необходимости.
+
+При конфигурации **zram** нужно учитывать, что указываемый максимальный размер считается по несжатым данным, то есть в теории вы можете сконфигурировать размер данного устройства равным или большим чем физический размер RAM, если в сжатом состоянии данные не превысят этот параметр.
+
+Плохо работает параллельно с **zswap**, так как он функционирует как swap-кэш перед **zram**, и сжимает вытесняемую память до того, как она успеет достичь **zram**. В случае использования zram - zswap рекомендовано отключать.
+
+Гибернация при использовании zram недоступна.
+
+**zswap** - функциональность ядра Linux, предоставляющая сжатый кэш в оперативной памяти. Страницы, подлежащие вытеснению, сжимаются и помещаются в пул памяти в RAM. Когда будет достигнут определенный порог заполнения RAM, данные страницы разархивируются и скидываются на диск, как и было бы сделано, при отсутствии **zswap**. 
+Отличие от **zram** в том, что zswap работает в паре со swap-устройством, а zram, кроме всего прочего, само является таковым.
+
+---
+
+Требуется написать про: 
+
+* сделать описание всех syscall'ов, которые упоминаются в тексте. mlock, mlockall итп
+* cgroups
+* memory pressure и config_psi
+* попытаться в low-level детали
+* про виртуальную память
+
